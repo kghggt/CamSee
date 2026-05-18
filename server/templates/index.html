@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="CamSee - 实时视频监控系统">
+    <title>CamSee 监控中心</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <!-- 顶部导航栏 -->
+    <header class="header" id="header">
+        <div class="header-left">
+            <div class="logo">
+                <svg class="logo-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/>
+                    <path d="M2 12C2 12 5 5 12 5C19 5 22 12 22 12C22 12 19 19 12 19C5 19 2 12 2 12Z" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                </svg>
+                <span class="logo-text">CamSee</span>
+            </div>
+            <span class="header-subtitle">监控中心</span>
+        </div>
+        <div class="header-right">
+            <div class="status-badge" id="connectionBadge">
+                <span class="status-dot"></span>
+                <span class="status-text">未连接</span>
+            </div>
+            <div class="time-display" id="timeDisplay">--:--:--</div>
+        </div>
+    </header>
+
+    <!-- 主内容区 -->
+    <main class="main-content">
+        <!-- 视频区域 -->
+        <section class="video-section" id="videoSection">
+            <div class="video-container" id="videoContainer">
+                <!-- 离线状态 -->
+                <div class="video-offline" id="videoOffline">
+                    <svg class="offline-icon" viewBox="0 0 24 24" fill="none">
+                        <path d="M15.5 10.5L19.5 7.5C20.16 7.02 21 7.49 21 8.31V15.69C21 16.51 20.16 16.98 19.5 16.5L15.5 13.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                        <rect x="3" y="6" width="13" height="12" rx="2" stroke="currentColor" stroke-width="1.5"/>
+                        <line x1="3" y1="3" x2="21" y2="21" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    </svg>
+                    <h2>等待摄像头连接</h2>
+                    <p>请启动本地摄像头客户端以开始监控</p>
+                </div>
+
+                <!-- 视频画布 -->
+                <canvas id="videoCanvas" style="display:none;"></canvas>
+
+                <!-- 视频叠加信息 -->
+                <div class="video-overlay" id="videoOverlay" style="display:none;">
+                    <div class="overlay-top">
+                        <span class="live-badge">
+                            <span class="live-dot"></span>
+                            LIVE
+                        </span>
+                        <span class="camera-label" id="cameraLabel">主摄像头</span>
+                    </div>
+                    <div class="overlay-bottom">
+                        <span class="fps-counter" id="fpsCounter">0 FPS</span>
+                        <span class="resolution-label" id="resolutionLabel">--</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 视频控制栏 -->
+            <div class="video-controls">
+                <button class="control-btn" id="fullscreenBtn" title="全屏">
+                    <svg viewBox="0 0 24 24" fill="none">
+                        <path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                </button>
+                <button class="control-btn" id="screenshotBtn" title="截图">
+                    <svg viewBox="0 0 24 24" fill="none">
+                        <rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" stroke-width="2"/>
+                        <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/>
+                    </svg>
+                </button>
+                <button class="control-btn" id="reconnectBtn" title="重新连接">
+                    <svg viewBox="0 0 24 24" fill="none">
+                        <path d="M1 4v6h6M23 20v-6h-6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                </button>
+            </div>
+        </section>
+
+        <!-- 右侧信息面板 -->
+        <aside class="info-panel" id="infoPanel">
+            <!-- 连接状态卡片 -->
+            <div class="info-card">
+                <h3 class="card-title">
+                    <svg viewBox="0 0 24 24" fill="none" class="card-icon">
+                        <path d="M22 11.08V12a10 10 0 11-5.93-9.14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <path d="M22 4L12 14.01l-3-3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    连接状态
+                </h3>
+                <div class="status-grid">
+                    <div class="stat-item">
+                        <span class="stat-label">摄像头</span>
+                        <span class="stat-value" id="statCamera">离线</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">服务器</span>
+                        <span class="stat-value" id="statServer">连接中</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">延迟</span>
+                        <span class="stat-value" id="statLatency">-- ms</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">在线观看</span>
+                        <span class="stat-value" id="statViewers">0</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 摄像头信息卡片 -->
+            <div class="info-card">
+                <h3 class="card-title">
+                    <svg viewBox="0 0 24 24" fill="none" class="card-icon">
+                        <path d="M15.5 10.5L19.5 7.5C20.16 7.02 21 7.49 21 8.31V15.69C21 16.51 20.16 16.98 19.5 16.5L15.5 13.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <rect x="3" y="6" width="13" height="12" rx="2" stroke="currentColor" stroke-width="2"/>
+                    </svg>
+                    摄像头信息
+                </h3>
+                <div class="status-grid">
+                    <div class="stat-item">
+                        <span class="stat-label">名称</span>
+                        <span class="stat-value" id="statName">--</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">分辨率</span>
+                        <span class="stat-value" id="statResolution">--</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">帧率</span>
+                        <span class="stat-value" id="statFps">--</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">已接收帧</span>
+                        <span class="stat-value" id="statFrames">0</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 系统日志卡片 -->
+            <div class="info-card log-card">
+                <h3 class="card-title">
+                    <svg viewBox="0 0 24 24" fill="none" class="card-icon">
+                        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                    系统日志
+                </h3>
+                <div class="log-container" id="logContainer">
+                    <div class="log-entry log-info">系统初始化...</div>
+                </div>
+            </div>
+        </aside>
+    </main>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

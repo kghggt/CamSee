@@ -1,0 +1,33 @@
+# ============================================================
+# CamSee 摄像头客户端配置模板
+# 使用说明：
+#   1. 将此文件复制一份，重命名为 config.yaml
+#   2. 按照注释填写你自己的服务器地址和认证令牌
+#   3. config.yaml 已被 .gitignore 屏蔽，不会上传到 GitHub
+# ============================================================
+
+# 云服务器 WebSocket 地址
+# - 如果使用 Tailscale 虚拟局域网，填写 Tailscale 分配的 100.x.x.x IP
+# - 如果使用 SSH 本地隧道，填写 ws://127.0.0.1:本地端口
+# - 如果服务器已开放公网端口，填写 ws://你的公网IP:8000
+server_url: "ws://YOUR_SERVER_IP_OR_TAILSCALE_IP:8000"
+
+# 认证令牌（必须和服务器端 server.py 中的 AUTH_TOKEN 一致）
+token: "<removed-token>"
+
+# ---------- 摄像头设置 ----------
+camera_id: 0              # USB 摄像头编号（通常为 0；外接摄像头一般为 1）
+camera_name: "主摄像头"     # 摄像头名称（将显示在监控面板上）
+
+# ---------- 画质设置（根据网络条件调整）----------
+# 高质量（Tailscale P2P 直连网络）
+# width: 1280
+# height: 720
+# fps: 20
+# jpeg_quality: 70
+
+# 低带宽（VPN 或弱网环境）
+width: 640
+height: 360
+fps: 10
+jpeg_quality: 40
