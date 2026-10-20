@@ -8,6 +8,7 @@ CamSee - 摄像头采集客户端
 import asyncio
 import cv2
 import websockets
+import inspect
 import json
 import time
 import yaml
@@ -26,6 +27,19 @@ def load_config():
         return yaml.safe_load(f)
 
 
+def ws_auth_kwargs(token: str) -> dict:
+    """
+    生成携带认证头的 connect() 参数。
+
+    websockets 14+ 将顶层 connect() 切换到了新的 asyncio 实现，握手头参数
+    由 extra_headers 改名为 additional_headers。这里按实际函数签名选择，
+    既能在新版上工作，也能兼容开发板上的旧版本，不必锁死依赖版本。
+    """
+    params = inspect.signature(websockets.connect).parameters
+    key = "additional_headers" if "additional_headers" in params else "extra_headers"
+    return {key: {"Authorization": f"Bearer {token}"}}
+
+
 class CameraClient:
     """USB 摄像头采集和推流客户端"""
 
@@ -41,6 +55,7 @@ class CameraClient:
 
         self.running = False
         self.cap = None
+        self.actual_resolution = f"{self.width}x{self.height}"
 
         # 日志
         logging.basicConfig(
@@ -63,6 +78,7 @@ class CameraClient:
 
         actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.actual_resolution = f"{actual_w}x{actual_h}"
         self.logger.info(f"摄像头已打开，实际分辨率: {actual_w}x{actual_h}")
 
     async def stream(self):
@@ -77,18 +93,18 @@ class CameraClient:
 
                 async with websockets.connect(
                     ws_url,
-                    additional_headers={"Authorization": f"Bearer {self.token}"},
+                    **ws_auth_kwargs(self.token),
                     max_size=10 * 1024 * 1024,
                     ping_interval=20,
                     ping_timeout=10,
                 ) as ws:
-                    # 发送摄像头信息
+                    # 发送摄像头信息（分辨率用摄像头的实际值，而非配置值）
                     await ws.send(
                         json.dumps(
                             {
                                 "type": "camera_info",
                                 "camera_name": self.camera_name,
-                                "resolution": f"{self.width}x{self.height}",
+                                "resolution": self.actual_resolution,
                                 "fps": self.fps,
                             }
                         )
@@ -125,6 +141,10 @@ class CameraClient:
                         if sleep_time > 0:
                             await asyncio.sleep(sleep_time)
 
+            except websockets.exceptions.InvalidHandshake as e:
+                self.logger.error(
+                    f"握手被拒绝，通常是令牌不匹配，请核对 config.yaml 的 token: {e}"
+                )
             except websockets.exceptions.ConnectionClosed as e:
                 self.logger.warning(f"连接已断开: {e}")
             except ConnectionRefusedError:

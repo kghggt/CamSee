@@ -179,12 +179,20 @@
     // ============================================
     // 帧渲染
     // ============================================
-    function renderFrame(arrayBuffer) {
-        const blob = new Blob([arrayBuffer], { type: 'image/jpeg' });
-        const url = URL.createObjectURL(blob);
-        const img = new Image();
+    // 复用同一个 Image 对象，避免每帧 new Image 造成的 GC 抖动
+    const frameImage = new Image();
+    let decoding = false;   // 上一帧还没画完时，丢弃新帧以保持实时性
 
-        img.onload = () => {
+    function renderFrame(arrayBuffer) {
+        if (decoding) return;
+
+        decoding = true;
+        const url = URL.createObjectURL(new Blob([arrayBuffer], { type: 'image/jpeg' }));
+
+        frameImage.onload = () => {
+            decoding = false;
+            URL.revokeObjectURL(url);
+
             // 首次收到帧时更新状态
             if (!state.cameraOnline) {
                 setCameraStatus(true);
@@ -192,14 +200,14 @@
             }
 
             // 更新 Canvas 尺寸（仅在分辨率变化时）
-            if (els.videoCanvas.width !== img.width || els.videoCanvas.height !== img.height) {
-                els.videoCanvas.width = img.width;
-                els.videoCanvas.height = img.height;
-                els.resolutionLabel.textContent = `${img.width}×${img.height}`;
+            if (els.videoCanvas.width !== frameImage.width ||
+                els.videoCanvas.height !== frameImage.height) {
+                els.videoCanvas.width = frameImage.width;
+                els.videoCanvas.height = frameImage.height;
+                els.resolutionLabel.textContent = `${frameImage.width}×${frameImage.height}`;
             }
 
-            ctx.drawImage(img, 0, 0);
-            URL.revokeObjectURL(url);
+            ctx.drawImage(frameImage, 0, 0);
 
             // 帧计数与 FPS 计算
             state.frameCount++;
@@ -216,11 +224,12 @@
             }
         };
 
-        img.onerror = () => {
+        frameImage.onerror = () => {
+            decoding = false;
             URL.revokeObjectURL(url);
         };
 
-        img.src = url;
+        frameImage.src = url;
     }
 
     // ============================================
@@ -228,25 +237,40 @@
     // ============================================
     async function fetchStatus() {
         try {
-            const response = await fetch('/api/status');
-            const data = await response.json();
+            const response = await fetch('/api/status', { cache: 'no-store' });
 
-            if (data.cameras && data.cameras.length > 0) {
-                const cam = data.cameras[0];
+            // 会话过期 / 未登录 → 回到登录页
+            if (response.status === 401) {
+                location.href = '/';
+                return;
+            }
+
+            const data = await response.json();
+            const cam = data.cameras && data.cameras[0];
+
+            if (cam) {
                 els.statName.textContent = cam.name || '--';
                 els.statResolution.textContent = cam.resolution || '--';
                 els.statFps.textContent = cam.fps ? `${cam.fps} fps` : '--';
-                els.statViewers.textContent = cam.viewers || '0';
+                els.statViewers.textContent = cam.viewers || 0;
                 els.cameraLabel.textContent = cam.name || '主摄像头';
 
-                // 估算延迟（简单的 RTT / 2）
-                const start = Date.now();
-                await fetch('/api/status');
-                const latency = Math.round((Date.now() - start) / 2);
-                els.statLatency.textContent = `${latency} ms`;
+                // 画面滞后：服务端最后一帧距今的毫秒数（不是 HTTP RTT）
+                if (typeof cam.frame_age_ms === 'number') {
+                    els.statLatency.textContent = `${cam.frame_age_ms} ms`;
+                    // 摄像头挂着但长时间没有新帧，判定画面已中断
+                    if (cam.frame_age_ms > 3000) setCameraStatus(false);
+                } else {
+                    els.statLatency.textContent = '-- ms';
+                }
             } else {
+                // 服务端已无在线摄像头
                 els.statName.textContent = '--';
+                els.statResolution.textContent = '--';
+                els.statFps.textContent = '--';
                 els.statViewers.textContent = '0';
+                els.statLatency.textContent = '-- ms';
+                setCameraStatus(false);
             }
         } catch (e) {
             // 静默处理
@@ -332,9 +356,9 @@
         // 连接 WebSocket
         connectViewer();
 
-        // 状态轮询（每 3 秒）
+        // 状态轮询（每 5 秒一次）
         fetchStatus();
-        state.statusTimer = setInterval(fetchStatus, 3000);
+        state.statusTimer = setInterval(fetchStatus, 5000);
     }
 
     // 页面加载完成后初始化

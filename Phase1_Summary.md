@@ -15,7 +15,7 @@
 └──────────────┘                  └──────────────────┘                  └──────────────┘
        ↑                                  ↑                                    ↑
   本地电脑/开发板               Ubuntu 云服务器                          任意设备浏览器
-  Tailscale 组网             Tailscale IP: <removed-ip>                 Tailscale 组网
+  Tailscale 组网             Tailscale IP: 100.x.x.x                    Tailscale 组网
 ```
 
 ---
@@ -52,17 +52,27 @@
 
 | 优化项 | 优化前 | 优化后 |
 |--------|--------|--------|
-| 帧广播方式 | 串行逐个发送（一个慢全部卡） | 并行发送 + 0.5s 超时丢帧 |
-| 前端渲染 | 每帧创建 Blob+Image 对象（频繁 GC） | 复用 Image 对象，减少内存抖动 |
-| 状态轮询 | 每 3 秒发 2 次 HTTP 请求 | 每 5 秒发 1 次，延迟改用时间戳计算 |
+| 帧广播方式 | 串行逐个发送（一个慢全部卡） | 每观众独立队列 + 独立发送任务，队列满丢旧帧（v2） |
+| 前端渲染 | 每帧创建 Blob+Image 对象（频繁 GC） | 复用单个 Image 对象，渲染跟不上时主动丢帧（v2） |
+| 状态轮询 | 每 3 秒发 2 次 HTTP 请求 | 每 5 秒 1 次，滞后改用服务端帧龄计算（v2） |
 | 弱网适配 | 1280×720 / 15fps / 质量70 | 640×360 / 20fps / 质量40 |
+
+### 4. 安全加固（v2）
+
+| 问题 | 处理 | 状态 |
+|------|------|------|
+| 令牌硬编码在 server.py | 改为环境变量 `CAMSEE_TOKEN`，未设置则启动期随机生成 | ✅ |
+| 观看端 `/ws/viewer`、`/api/status` 无鉴权 | 新增登录页 + HttpOnly 签名 Cookie，统一校验 | ✅ |
+| 令牌比较是否恒定时间 | 改用 `hmac.compare_digest` | ✅ |
+| 仓库内明文密码 | 已从文档移除，**历史提交仍需重写** | ⚠️ 待处理 |
+| 传输未加密 | 仍为明文 WS/HTTP，需配 Nginx + TLS | ⬜ 待处理 |
 
 ### 4. Tailscale 虚拟局域网部署
 
 已在云服务器上完成 Tailscale 安装与配置：
-- **服务器 Tailscale IP：** `<removed-ip>`
+- **服务器 Tailscale IP：** `100.x.x.x`（内网地址，本地保存）
 - **监控服务端口：** `8000`
-- **效果：** 任何加入同一 Tailscale 网络的设备，无论身处何种网络环境（校园网、家庭宽带、5G），均可通过 `http://<removed-ip>:8000` 直接访问监控画面。
+- **效果：** 任何加入同一 Tailscale 网络的设备，无论身处何种网络环境（校园网、家庭宽带、5G），均可通过 `http://100.x.x.x:8000` 直接访问监控画面。
 
 ---
 
@@ -70,33 +80,38 @@
 
 ```
 CamSee/
-├── client/                     # 本地采集客户端
-│   ├── camera_client.py        # 摄像头采集 + WebSocket 推流
-│   ├── config.yaml             # 客户端配置（服务器地址、画质参数等）
-│   └── requirements.txt        # Python 依赖
-├── server/                     # 云端服务
-│   ├── server.py               # FastAPI 主服务
-│   ├── requirements.txt        # Python 依赖
+├── client/                          # 本地采集客户端
+│   ├── camera_client.py             # Windows 版：摄像头采集 + WebSocket 推流
+│   ├── camera_client_imx6u.py       # 嵌入式版：i.MX6U / V4L2，采集与发送解耦
+│   ├── config.yaml                  # 客户端配置（本地文件，不入库）
+│   ├── config.yaml.example          # 配置模板
+│   └── requirements.txt             # Python 依赖
+├── server/                          # 云端服务
+│   ├── server.py                    # FastAPI 主服务（含登录鉴权）
+│   ├── requirements.txt             # Python 依赖
 │   ├── templates/
-│   │   └── index.html          # 监控面板 HTML
+│   │   └── index.html               # 监控面板 HTML
 │   └── static/
-│       ├── css/style.css       # 面板样式
-│       └── js/app.js           # 前端交互逻辑
-├── deploy.bat                  # 一键部署脚本
-├── Phase1_Summary.md           # 本文档
-└── README.md                   # 项目说明
+│       ├── css/style.css            # 面板样式
+│       └── js/app.js                # 前端交互逻辑
+├── deploy.bat                       # 一键部署脚本（目标地址在文件头部配置）
+├── Phase1_Summary.md                # 本文档
+└── README.md                        # 项目说明
 ```
 
 ---
 
 ## 🔧 关键配置信息
 
+> ⚠️ 本文件在仓库中公开可见，**不要写入密码、令牌、公网 IP 等凭据**。
+> 实际连接参数请保存在本地 `client/config.yaml`（已被 .gitignore 屏蔽）或密码管理器中。
+
 | 配置项 | 值 |
 |--------|----|
-| 云服务器 SSH | `ssh -p <removed-port> ubuntu@<removed-host>` (密码: <removed>) |
-| 云服务器 Tailscale IP | `<removed-ip>` |
+| 云服务器 SSH | `ssh -p <端口> <用户名>@<服务器IP>`（凭据不入库） |
+| 云服务器 Tailscale IP | `100.x.x.x`（内网地址，见本地 config.yaml） |
 | 监控服务端口 | `8000` |
-| 认证 Token | `<removed-token>` |
+| 认证 Token | 由服务器环境变量 `CAMSEE_TOKEN` 提供，不再硬编码 |
 | 客户端 Python 环境 | Conda `CamSee` (Python 3.12) |
 | 服务端代码路径 | `/data1/lm/CamSee/server/` |
 | 当前画质配置 | 640×360 / 20 FPS / JPEG 质量 40 |
@@ -128,18 +143,19 @@ CamSee/
 
 ### 第一步：启动云端服务器
 
-通过 SSH 登录云服务器：
+通过 SSH 登录云服务器（端口与账号见本地记录，不写入仓库）：
 ```bash
-ssh -p <removed-port> ubuntu@<removed-host>
-# 密码: <removed>
+ssh -p <端口> <用户名>@<服务器IP>
 ```
 
-进入项目目录并启动服务：
+进入项目目录、设置令牌并启动服务：
 ```bash
 cd /data1/lm/CamSee/server
+export CAMSEE_TOKEN='你的自定义密钥'      # 与客户端 config.yaml 的 token 保持一致
 python3 server.py
 ```
 > 看到 `🚀 CamSee 服务器启动: http://0.0.0.0:8000` 即表示启动成功。
+> 若未设置 `CAMSEE_TOKEN`，服务会随机生成一个令牌并打印在日志里（重启即失效）。
 
 ### 第二步：启动本地采集客户端
 
@@ -154,12 +170,14 @@ python camera_client.py
 
 ### 第三步：观看监控画面
 
-在任何已加入 Tailscale 网络的设备上，打开浏览器访问：
+在已加入 Tailscale 网络的设备上，打开浏览器访问：
 
 | 场景 | 访问地址 |
 |------|----------|
-| 通过 Tailscale（推荐） | `http://<removed-ip>:8000` |
-| 在校园网内（本地隧道方式） | 先运行 `ssh -g -N -L 8080:127.0.0.1:8000 -p <removed-port> ubuntu@<removed-host>`，然后访问 `http://127.0.0.1:8080` |
+| 通过 Tailscale（推荐） | `http://<Tailscale IP>:8000` |
+| 在校园网内（本地隧道方式） | 先运行 `ssh -g -N -L 8080:127.0.0.1:8000 -p <端口> <用户名>@<服务器IP>`，然后访问 `http://127.0.0.1:8080` |
+
+首次访问会看到登录页，输入 `CAMSEE_TOKEN` 即可进入面板（有效期 30 天，点右上角「退出」可清除）。
 
 ### ⚠️ 注意事项
 - 云服务器上的 **Tailscale 需要保持运行**，如果服务器重启了，需要重新执行 `sudo tailscale up`。

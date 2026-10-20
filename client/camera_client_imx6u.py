@@ -25,6 +25,7 @@ CamSee - 嵌入式摄像头采集客户端
 import asyncio
 import cv2
 import websockets
+import inspect
 import json
 import time
 import yaml
@@ -68,6 +69,19 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(f)
 
 
+def ws_auth_kwargs(token: str) -> dict:
+    """
+    生成携带认证头的 connect() 参数。
+
+    websockets 14+ 将顶层 connect() 切换到新的 asyncio 实现，握手头参数
+    由 extra_headers 改名为 additional_headers。开发板上往往是旧版本，
+    这里按实际签名选择，避免因版本差异直接抛 TypeError。
+    """
+    params = inspect.signature(websockets.connect).parameters
+    key = "additional_headers" if "additional_headers" in params else "extra_headers"
+    return {key: {"Authorization": f"Bearer {token}"}}
+
+
 # ============================================================
 # 摄像头设备扫描（Linux V4L2 方式）
 # ============================================================
@@ -103,12 +117,9 @@ class EmbeddedCameraClient:
 
     与 Windows 版的核心区别：
     - 使用 V4L2 后端，设备路径为字符串 "/dev/videoX"
-    - 帧捕获与帧发送通过 asyncio.Queue 解耦，避免低功耗 CPU 积压
-    - 队列满时丢弃旧帧而非阻塞，确保实时性
+    - 帧捕获在独立线程、帧发送在事件循环，二者用「最新帧 + Event」交接
+    - 只保留最新一帧，发送跟不上时旧帧自然被覆盖，不会积压
     """
-
-    # 发送队列最大长度，超出则丢弃旧帧（防积压）
-    QUEUE_MAX_SIZE = 3
 
     def __init__(self, config: dict, device: str):
         self.server_url = config["server_url"]
@@ -122,7 +133,12 @@ class EmbeddedCameraClient:
 
         self.running = False
         self.cap = None
-        self._frame_queue: asyncio.Queue = None
+        self.actual_resolution = f"{self.width}x{self.height}"
+
+        # 跨线程交接：捕获线程只做整体赋值 + 置位 Event，事件循环负责读走
+        self._loop: asyncio.AbstractEventLoop = None
+        self._pending_frame = None
+        self._frame_ready: asyncio.Event = None
 
         # 日志
         logging.basicConfig(
@@ -149,25 +165,30 @@ class EmbeddedCameraClient:
         if not self.cap.isOpened():
             raise RuntimeError(f"无法打开摄像头 {self.device}，请检查 USB 连接和权限 (ls -l /dev/video*)")
 
-        # 设置分辨率和帧率
+        # 先设 MJPG 格式（如果摄像头支持），可大幅降低 USB 带宽占用。
+        # 注意必须在设分辨率之前，否则部分 UVC 摄像头会重置分辨率
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+
+        # 再设置分辨率和帧率
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         self.cap.set(cv2.CAP_PROP_FPS, self.fps)
 
-        # 使用 MJPG 格式（如果摄像头支持），可大幅降低 USB 带宽占用
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-
         actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+        self.actual_resolution = f"{actual_w}x{actual_h}"
         self.logger.info(
             f"摄像头已打开 | 实际分辨率: {actual_w}x{actual_h} | 实际帧率: {actual_fps}"
         )
 
     def _capture_frames_sync(self):
         """
-        同步帧捕获循环（在独立线程中运行，避免阻塞 asyncio 事件循环）
-        捕获到的帧放入队列；队列满时丢弃最旧的帧以保证实时性。
+        同步帧捕获循环（在独立线程中运行，避免阻塞 asyncio 事件循环）。
+
+        只保留最新一帧：整体赋值在 CPython 里是原子的，无需加锁；
+        Event 不是线程安全的，必须通过 call_soon_threadsafe 唤醒事件循环。
+        发送跟不上时，旧帧会被新帧自然覆盖，不会积压。
         """
         frame_interval = 1.0 / self.fps
         while self.running:
@@ -185,19 +206,11 @@ class EmbeddedCameraClient:
             if not ok:
                 continue
 
-            jpeg_bytes = buf.tobytes()
-
-            # 如果队列已满，丢弃最旧的帧（非阻塞）
-            if self._frame_queue.qsize() >= self.QUEUE_MAX_SIZE:
-                try:
-                    self._frame_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-
+            self._pending_frame = buf.tobytes()
             try:
-                self._frame_queue.put_nowait(jpeg_bytes)
-            except asyncio.QueueFull:
-                pass  # 再次满了也无所谓，直接丢弃
+                self._loop.call_soon_threadsafe(self._frame_ready.set)
+            except RuntimeError:
+                break          # 事件循环已关闭，退出线程
 
             # 控制采集帧率
             elapsed = time.time() - loop_start
@@ -207,95 +220,101 @@ class EmbeddedCameraClient:
 
     async def _send_frames(self, ws):
         """
-        异步帧发送循环：从队列中取帧并通过 WebSocket 发送
+        异步帧发送循环：等待「有新帧」信号，取走最新帧并发送。
         """
         frame_count = 0
-        report_interval = self.fps * 10  # 每 10 秒报告一次
+        report_interval = max(1, self.fps * 10)  # 每 10 秒报告一次
 
         while self.running:
             try:
-                # 等待队列中有帧可取（最多等 1 秒，防止连接断开后僵死）
-                jpeg_bytes = await asyncio.wait_for(
-                    self._frame_queue.get(), timeout=1.0
-                )
-                await ws.send(jpeg_bytes)
-
-                frame_count += 1
-                if frame_count % report_interval == 0:
-                    queue_size = self._frame_queue.qsize()
-                    self.logger.info(
-                        f"已发送 {frame_count} 帧 | 队列积压: {queue_size}/{self.QUEUE_MAX_SIZE}"
-                    )
-
+                # 最多等 1 秒，避免连接异常时僵死
+                await asyncio.wait_for(self._frame_ready.wait(), timeout=1.0)
             except asyncio.TimeoutError:
-                # 队列超时：正常现象，继续等
                 continue
+
+            self._frame_ready.clear()
+            jpeg_bytes = self._pending_frame
+            if jpeg_bytes is None:
+                continue
+
+            try:
+                await ws.send(jpeg_bytes)
             except Exception as e:
                 self.logger.warning(f"发送帧时出现异常: {e}")
                 break
 
+            frame_count += 1
+            if frame_count % report_interval == 0:
+                self.logger.info(f"已发送 {frame_count} 帧（仅保留最新帧，无积压）")
+
     async def stream(self):
         """
-        主推流循环，支持断线自动重连（指数退避）
-        捕获线程和发送协程并行运行
+        主推流循环，支持断线自动重连（指数退避）。
+
+        采集线程与 WebSocket 连接解耦：只启动一次，重连期间持续采集，
+        重连成功后立刻就能拿到最新一帧，不会因为反复拉起线程而残留多份。
         """
         self.running = True
         reconnect_delay = 1
+        self._loop = asyncio.get_running_loop()
+        self._frame_ready = asyncio.Event()
 
-        while self.running:
-            # 每次重连时重新创建一个干净的帧队列
-            self._frame_queue = asyncio.Queue(maxsize=self.QUEUE_MAX_SIZE * 2)
+        capture_future = self._loop.run_in_executor(None, self._capture_frames_sync)
 
-            try:
-                ws_url = f"{self.server_url}/ws/camera"
-                self.logger.info(f"正在连接服务器 {ws_url} ...")
+        try:
+            while self.running:
+                try:
+                    ws_url = f"{self.server_url}/ws/camera"
+                    self.logger.info(f"正在连接服务器 {ws_url} ...")
 
-                async with websockets.connect(
-                    ws_url,
-                    additional_headers={"Authorization": f"Bearer {self.token}"},
-                    max_size=10 * 1024 * 1024,
-                    ping_interval=20,
-                    ping_timeout=10,
-                ) as ws:
-                    # 发送摄像头元信息
-                    await ws.send(json.dumps({
-                        "type": "camera_info",
-                        "camera_name": self.camera_name,
-                        "resolution": f"{self.width}x{self.height}",
-                        "fps": self.fps,
-                        "device": self.device,
-                        "platform": "Linux/ARM (i.MX6U)",
-                    }))
+                    async with websockets.connect(
+                        ws_url,
+                        **ws_auth_kwargs(self.token),
+                        max_size=10 * 1024 * 1024,
+                        ping_interval=20,
+                        ping_timeout=10,
+                    ) as ws:
+                        # 发送摄像头元信息（分辨率用实际值）
+                        await ws.send(json.dumps({
+                            "type": "camera_info",
+                            "camera_name": self.camera_name,
+                            "resolution": self.actual_resolution,
+                            "fps": self.fps,
+                            "device": self.device,
+                            "platform": "Linux/ARM (i.MX6U)",
+                        }))
 
-                    self.logger.info("✅ 已连接，开始推流...")
-                    reconnect_delay = 1
+                        self.logger.info("✅ 已连接，开始推流...")
+                        reconnect_delay = 1
 
-                    # 在独立线程中运行同步的帧捕获，不阻塞 asyncio
-                    loop = asyncio.get_event_loop()
-                    capture_task = loop.run_in_executor(None, self._capture_frames_sync)
-
-                    # 在当前协程中运行异步的帧发送
-                    try:
+                        # 在当前协程中运行异步的帧发送，采集在后台线程
                         await self._send_frames(ws)
-                    finally:
-                        # 发送循环结束（连接断开），停止捕获线程
-                        self.running = False
-                        await capture_task
-                        self.running = True  # 重连时重置
 
-            except websockets.exceptions.ConnectionClosed as e:
-                self.logger.warning(f"连接已断开: {e}")
-            except ConnectionRefusedError:
-                self.logger.warning("连接被拒绝，服务器可能未启动")
-            except OSError as e:
-                self.logger.warning(f"网络错误: {e}")
-            except Exception as e:
-                self.logger.error(f"未知错误: {e}")
+                except websockets.exceptions.InvalidHandshake as e:
+                    self.logger.error(
+                        f"握手被拒绝，通常是令牌不匹配，请核对 config.yaml 的 token: {e}"
+                    )
+                except websockets.exceptions.ConnectionClosed as e:
+                    self.logger.warning(f"连接已断开: {e}")
+                except ConnectionRefusedError:
+                    self.logger.warning("连接被拒绝，服务器可能未启动")
+                except OSError as e:
+                    self.logger.warning(f"网络错误: {e}")
+                except Exception as e:
+                    self.logger.error(f"未知错误: {e}")
 
-            if self.running:
-                self.logger.info(f"将在 {reconnect_delay} 秒后重连...")
-                await asyncio.sleep(reconnect_delay)
-                reconnect_delay = min(reconnect_delay * 2, 30)
+                if self.running:
+                    self.logger.info(f"将在 {reconnect_delay} 秒后重连...")
+                    await asyncio.sleep(reconnect_delay)
+                    reconnect_delay = min(reconnect_delay * 2, 30)
+        finally:
+            # 停止采集线程。若 cap.read() 阻塞（例如摄像头被拔出），
+            # 最多等 3 秒，避免整个进程永久卡在这里
+            self.running = False
+            try:
+                await asyncio.wait_for(capture_future, timeout=3.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                self.logger.warning("采集线程未在 3 秒内退出（可能阻塞在读取帧），已放弃等待")
 
     def stop(self):
         """优雅停止"""

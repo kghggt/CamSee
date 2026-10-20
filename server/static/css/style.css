@@ -183,6 +183,22 @@ body::before {
     letter-spacing: 0.04em;
 }
 
+/* 退出登录 */
+.logout-link {
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    text-decoration: none;
+    padding: 4px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    transition: color var(--transition), border-color var(--transition);
+}
+
+.logout-link:hover {
+    color: var(--error);
+    border-color: var(--error-glow);
+}
+
 /* ---------- 主内容布局 ---------- */
 .main-content {
     position: relative;

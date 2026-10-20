@@ -12,8 +12,9 @@
 # - 如果服务器已开放公网端口，填写 ws://你的公网IP:8000
 server_url: "ws://YOUR_SERVER_IP_OR_TAILSCALE_IP:8000"
 
-# 认证令牌（必须和服务器端 server.py 中的 AUTH_TOKEN 一致）
-token: "<removed-token>"
+# 认证令牌（必须和服务器端环境变量 CAMSEE_TOKEN 一致）
+# 不要使用示例值，换成一个足够长的随机串
+token: "CHANGE_ME_TO_YOUR_TOKEN"
 
 # ---------- 摄像头设置 ----------
 camera_id: 0              # USB 摄像头编号（通常为 0；外接摄像头一般为 1）
